@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { requireAuth } from '../middleware/auth.js';
 import prisma from '../db.js';
-import { consumeTurn } from './usage.js';
+import { consumeTurn, refundTurn, DAILY_LIMIT } from './usage.js';
 import hogwartsSystemPrompt from '../prompts/hogwarts.js';
 import { MODELS, MAX_OUTPUT_TOKENS, resolveModelKey } from '../models.js';
 import {
@@ -72,6 +72,76 @@ async function callModel(modelKey, systemPrompt, stateBlock, messages) {
     : callAnthropic(modelString, systemPrompt, stateBlock, messages);
 }
 
+// ── Streaming variants ────────────────────────────────────────────────────────
+// Each emits text via onDelta and returns { cache_creation, cache_read }.
+
+async function streamAnthropic(modelString, systemPrompt, stateBlock, messages, onDelta) {
+  const system = [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+  if (stateBlock) system.push({ type: 'text', text: stateBlock });
+
+  const stream = anthropic.messages.stream({
+    model: modelString,
+    max_tokens: MAX_OUTPUT_TOKENS,
+    system,
+    messages,
+  });
+
+  for await (const event of stream) {
+    if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+      onDelta(event.delta.text);
+    }
+  }
+
+  const final = await stream.finalMessage();
+  const u = final.usage;
+  const cache_creation = u.cache_creation_input_tokens ?? 0;
+  const cache_read = u.cache_read_input_tokens ?? 0;
+  console.log(
+    `[cache] model=${modelString} cache_creation=${cache_creation} ` +
+    `cache_read=${cache_read} input=${u.input_tokens} output=${u.output_tokens}`
+  );
+  return { cache_creation, cache_read };
+}
+
+async function streamGemini(modelString, systemPrompt, stateBlock, messages, onDelta) {
+  const systemInstruction = stateBlock ? `${systemPrompt}\n\n${stateBlock}` : systemPrompt;
+  const model = geminiClient.getGenerativeModel({
+    model: modelString,
+    systemInstruction,
+    generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS },
+  });
+
+  const history = messages.slice(0, -1).map(({ role, content }) => ({
+    role: role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: content }],
+  }));
+  const chat = model.startChat({ history });
+  const result = await chat.sendMessageStream(messages[messages.length - 1].content);
+
+  let chars = 0;
+  for await (const chunk of result.stream) {
+    const t = chunk.text();
+    if (t) { chars += t.length; onDelta(t); }
+  }
+  const resp = await result.response;
+  const cache_read = resp.usageMetadata?.cachedContentTokenCount ?? 0;
+  console.log(`[gemini] model=${modelString} output_chars=${chars} cache_read=${cache_read}`);
+  return { cache_creation: 0, cache_read };
+}
+
+async function streamModel(modelKey, systemPrompt, stateBlock, messages, onDelta) {
+  const { provider, modelString } = MODELS[modelKey];
+  return provider === 'google'
+    ? streamGemini(modelString, systemPrompt, stateBlock, messages, onDelta)
+    : streamAnthropic(modelString, systemPrompt, stateBlock, messages, onDelta);
+}
+
+// One SSE event.
+function sse(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
 // Pull JSON out of a model reply that may be wrapped in ```json fences or prose.
 function extractJson(text) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -84,7 +154,7 @@ function extractJson(text) {
 
 // ── POST /api/ai/chat ─────────────────────────────────────────────────────────
 router.post('/chat', requireAuth, async (req, res) => {
-  const { worldId, message, history = [], preferredModel } = req.body;
+  const { worldId, message, history = [], preferredModel, stream = false } = req.body;
   if (!worldId || !message) {
     return res.status(400).json({ error: 'worldId and message are required' });
   }
@@ -159,18 +229,68 @@ router.post('/chat', requireAuth, async (req, res) => {
 
     // --- NORMAL PLAY ---
     const messages = [...recentHistory, { role: 'user', content: message }];
-    const text = await callModel(modelKey, systemPrompt, stateBlock, messages);
+    const limit = DAILY_LIMIT[user.plan];
 
-    // Silent rolling auto-save every N turns (no model call, no extra turn).
-    if (turnResult.turns % AUTOSAVE_EVERY === 0) {
-      const fullHistory = [...history, { role: 'user', content: message }, { role: 'assistant', content: text }];
+    // Auto-save runs only AFTER the model reply is complete (never mid-stream).
+    const maybeAutoSave = (fullText) => {
+      if (turnResult.turns % AUTOSAVE_EVERY !== 0) return false;
+      const fullHistory = [
+        ...history,
+        { role: 'user', content: message },
+        { role: 'assistant', content: fullText },
+      ];
       rollingAutoSave(req.user.sub, worldId, fullHistory)
         .catch((e) => console.error('[autosave] failed:', e.message));
+      return true;
+    };
+
+    if (!stream) {
+      // Non-streaming path (unchanged behavior).
+      const text = await callModel(modelKey, systemPrompt, stateBlock, messages);
+      const autosaved = maybeAutoSave(text);
+      return res.json({
+        text, turns_used: turnResult.turns, model: modelKey,
+        remaining: Math.max(0, limit - turnResult.turns), autosaved,
+      });
     }
 
-    res.json({ text, turns_used: turnResult.turns, model: modelKey });
+    // --- STREAMING PATH (all state-changing decisions already done) ---
+    res.set({
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+    res.flushHeaders?.();
+
+    let fullText = '';
+    try {
+      const { cache_creation, cache_read } = await streamModel(
+        modelKey, systemPrompt, stateBlock, messages,
+        (delta) => { fullText += delta; sse(res, 'delta', { text: delta }); },
+      );
+
+      const autosaved = maybeAutoSave(fullText);
+      sse(res, 'done', {
+        text: fullText,
+        cache_creation, cache_read,
+        turns_used: turnResult.turns,
+        remaining: Math.max(0, limit - turnResult.turns),
+        model: modelKey,
+        autosaved,
+      });
+      res.end();
+    } catch (err) {
+      console.error('[ai] stream error:', err.message);
+      // Refund only if the stream never produced any output.
+      if (fullText === '') {
+        await refundTurn(req.user.sub).catch(() => {});
+      }
+      sse(res, 'error', { error: '模型回應異常，請稍後再試。' });
+      res.end();
+    }
   } catch (err) {
     console.error('[ai] model error:', err.message);
+    if (res.headersSent) { res.end(); return; }
     res.status(502).json({ error: '模型回應異常，請稍後再試。' });
   }
 });

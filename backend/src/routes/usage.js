@@ -4,7 +4,7 @@ import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 
-const DAILY_LIMIT = { FREE: 3, PRO: 20 };
+export const DAILY_LIMIT = { FREE: 3, PRO: 20 };
 const GLOBAL_DAILY_CEILING = parseInt(process.env.GLOBAL_DAILY_TURN_CEILING || '5000', 10);
 
 router.get('/today', requireAuth, async (req, res) => {
@@ -41,6 +41,17 @@ export async function consumeTurn(userId, plan) {
 
   if (result.length === 0) return { ok: false, reason: 'user_limit' };
   return { ok: true, turns: result[0].turns };
+}
+
+// Give a turn back when a model call fails before any output was produced.
+// Atomic, never drops below 0.
+export async function refundTurn(userId) {
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+  await prisma.$queryRaw`
+    UPDATE daily_usage
+    SET turns = GREATEST(turns - 1, 0)
+    WHERE user_id = ${userId} AND date = ${today}
+  `;
 }
 
 // Test-only endpoint: POST /api/usage/consume-test  (disabled in production)

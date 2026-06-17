@@ -1,14 +1,13 @@
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue';
-import { usage, me, ai } from '../api.js';
+import { ref, onMounted, onUnmounted, nextTick } from 'vue';
+import { usage, me, ai, readSSE } from '../api.js';
 
 const props = defineProps({ token: String, plan: String });
 
-// Hogwarts world ID — seeded in DB; in production this would come from an API call
 const HOGWARTS_WORLD_ID = import.meta.env.VITE_HOGWARTS_WORLD_ID;
 
 const usageInfo    = ref({ used: 0, limit: 0, remaining: 0 });
-const narrative    = ref([]);   // [{role:'user'|'assistant', content:string}]
+const narrative    = ref([]);   // [{role, content, ...}]
 const input        = ref('');
 const sending      = ref(false);
 const limitReached = ref(false);
@@ -20,13 +19,47 @@ const narrativeEl  = ref(null);
 const PRO_MODELS = ['opus', 'sonnet', 'haiku', 'gemini-pro', 'gemini-flash', 'gemini-flash-lite'];
 const selectedModel = ref('');
 
+// Typewriter buffer for the currently streaming entry
+const streamingEntry = ref(null);
+let revealTimer = null;
+
+function startReveal() {
+  stopReveal();
+  revealTimer = setInterval(() => {
+    const e = streamingEntry.value;
+    if (!e || e.revealAll) return;
+    if (e.buffer.length === 0) return;
+    const take = Math.min(3, e.buffer.length);
+    e.displayed += e.buffer.slice(0, take);
+    e.buffer = e.buffer.slice(take);
+    scrollToBottom();
+  }, 15);
+}
+function stopReveal() {
+  if (revealTimer) { clearInterval(revealTimer); revealTimer = null; }
+}
+function flushBuffer(e) {
+  if (!e) return;
+  e.displayed += e.buffer;
+  e.buffer = '';
+}
+function showAll() {
+  const e = streamingEntry.value;
+  if (!e) return;
+  flushBuffer(e);
+  e.revealAll = true;   // subsequent deltas append immediately
+  scrollToBottom();
+}
+
+async function scrollToBottom() {
+  await nextTick();
+  narrativeEl.value?.scrollTo({ top: narrativeEl.value.scrollHeight, behavior: 'auto' });
+}
+
 async function loadMeta() {
-  const [u, m] = await Promise.all([
-    usage.today(props.token),
-    me.get(props.token),
-  ]);
-  usageInfo.value  = u;
-  userInfo.value   = m;
+  const [u, m] = await Promise.all([usage.today(props.token), me.get(props.token)]);
+  usageInfo.value = u;
+  userInfo.value  = m;
   selectedModel.value = m.preferredModel ?? (props.plan === 'PRO' ? 'opus' : '');
   if (u.remaining === 0) limitReached.value = true;
 }
@@ -41,56 +74,92 @@ async function switchModel(modelKey) {
   }
 }
 
+function applyRemaining(data) {
+  if (typeof data.turns_used === 'number') usageInfo.value.used = data.turns_used;
+  if (typeof data.remaining === 'number') usageInfo.value.remaining = data.remaining;
+  if (usageInfo.value.remaining === 0) limitReached.value = true;
+}
+
 async function send() {
   const msg = input.value.trim();
   if (!msg || sending.value || limitReached.value) return;
 
-  input.value   = '';
-  sending.value = true;
+  input.value    = '';
+  sending.value  = true;   // disables input + send button while streaming
   errorMsg.value = '';
 
   narrative.value.push({ role: 'user', content: msg });
 
-  // History sent to the model: only real dialogue (exclude save recaps),
-  // last 10 turns (20 entries). Backend also re-trims, this just limits payload.
+  // Real dialogue only (exclude save cards), last 10 turns (20 entries).
   const history = narrative.value
     .filter((e) => e.role === 'user' || e.role === 'assistant')
+    .map((e) => ({ role: e.role, content: e.role === 'assistant' ? (e.displayed ?? e.content) : e.content }))
     .slice(-21, -1);
 
   try {
-    const data = await ai.chat(
-      props.token,
-      HOGWARTS_WORLD_ID,
-      msg,
-      history,
-      selectedModel.value || undefined,
+    const res = await ai.chatStream(
+      props.token, HOGWARTS_WORLD_ID, msg, history, selectedModel.value || undefined,
     );
 
-    if (data.saved) {
-      narrative.value.push({ role: 'save', content: data.rendered });
-    } else {
-      narrative.value.push({ role: 'assistant', content: data.text });
+    const ctype = res.headers.get('content-type') || '';
+
+    // Non-stream responses: 429 limit, save card, or error JSON.
+    if (!ctype.includes('text/event-stream')) {
+      const data = await res.json();
+      if (res.status === 429) {
+        limitReached.value = true;
+        narrative.value.push({ role: 'assistant', content: data.error ?? '今日回合已用完。' });
+      } else if (data.saved) {
+        narrative.value.push({ role: 'save', content: data.rendered });
+        applyRemaining(data);
+      } else if (!res.ok) {
+        narrative.value.push({ role: 'assistant', content: data.error ?? '發生錯誤。' });
+      } else if (data.text) {
+        narrative.value.push({ role: 'assistant', content: data.text });
+        applyRemaining(data);
+      }
+      return;
     }
-    usageInfo.value.used      = data.turns_used;
-    usageInfo.value.remaining = Math.max(0, usageInfo.value.limit - data.turns_used);
-    if (usageInfo.value.remaining === 0) limitReached.value = true;
+
+    // Streaming: prepare an empty assistant entry as the sink.
+    const entry = ref({ role: 'assistant', displayed: '', buffer: '', revealAll: false, streaming: true });
+    narrative.value.push(entry.value);
+    streamingEntry.value = entry.value;
+    startReveal();
+
+    await readSSE(res, {
+      delta: (d) => {
+        const e = streamingEntry.value;
+        if (e.revealAll) { e.displayed += d.text; scrollToBottom(); }
+        else e.buffer += d.text;
+      },
+      done: (d) => {
+        const e = streamingEntry.value;
+        flushBuffer(e);
+        e.streaming = false;
+        applyRemaining(d);
+      },
+      error: (d) => {
+        const e = streamingEntry.value;
+        flushBuffer(e);
+        e.displayed += `\n（${d.error ?? '模型回應異常'}）`;
+        e.streaming = false;
+        e.failed = true;
+      },
+    });
   } catch (e) {
-    if (e.status === 429) {
-      limitReached.value = true;
-      narrative.value.push({ role: 'assistant', content: e.data?.error ?? '今日回合已用完。' });
-    } else {
-      errorMsg.value = e.message;
-      // Remove the user message we optimistically pushed
-      narrative.value.pop();
-    }
+    errorMsg.value = e.message;
   } finally {
+    stopReveal();
+    if (streamingEntry.value) { flushBuffer(streamingEntry.value); streamingEntry.value.streaming = false; }
+    streamingEntry.value = null;
     sending.value = false;
-    await nextTick();
-    narrativeEl.value?.scrollTo({ top: narrativeEl.value.scrollHeight, behavior: 'smooth' });
+    scrollToBottom();
   }
 }
 
 onMounted(loadMeta);
+onUnmounted(stopReveal);
 </script>
 
 <template>
@@ -103,7 +172,7 @@ onMounted(loadMeta);
     </div>
 
     <!-- PRO model switcher -->
-    <div v-if="plan === 'PRO'" style="padding:8px 0;display:flex;gap:8px;align-items:center">
+    <div v-if="plan === 'PRO'" style="padding:8px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span style="font-size:0.85em">模型：</span>
       <button
         v-for="m in PRO_MODELS" :key="m"
@@ -113,18 +182,11 @@ onMounted(loadMeta);
     </div>
 
     <!-- Narrative area -->
-    <div
-      ref="narrativeEl"
-      style="flex:1;overflow-y:auto;padding:16px 0;display:flex;flex-direction:column;gap:16px"
-    >
-      <div v-if="narrative.length === 0" style="color:#888">
-        （開始輸入，進入霍格華茲……）
-      </div>
+    <div ref="narrativeEl" style="flex:1;overflow-y:auto;padding:16px 0;display:flex;flex-direction:column;gap:16px">
+      <div v-if="narrative.length === 0" style="color:#888">（開始輸入，進入霍格華茲……）</div>
 
-      <div
-        v-for="(entry, i) in narrative" :key="i"
-        :style="{ marginLeft: entry.role === 'user' ? 'auto' : '0', maxWidth: '90%' }"
-      >
+      <div v-for="(entry, i) in narrative" :key="i"
+           :style="{ marginLeft: entry.role === 'user' ? 'auto' : '0', maxWidth: '90%' }">
         <div v-if="entry.role === 'user'" style="background:#f0f0f0;padding:8px 12px;border-radius:4px;white-space:pre-wrap">
           {{ entry.content }}
         </div>
@@ -132,11 +194,14 @@ onMounted(loadMeta);
           {{ entry.content }}
         </div>
         <div v-else style="white-space:pre-wrap;line-height:1.8">
-          {{ entry.content }}
+          {{ entry.displayed ?? entry.content }}<span v-if="entry.streaming" style="opacity:0.5">▌</span>
         </div>
       </div>
+    </div>
 
-      <div v-if="sending" style="color:#888">敘事者正在書寫……</div>
+    <!-- Show-all control (only while a stream is in flight) -->
+    <div v-if="streamingEntry && !streamingEntry.revealAll" style="padding:4px 0">
+      <button @click="showAll" style="font-size:0.85em">全部顯示</button>
     </div>
 
     <!-- Error -->
@@ -148,15 +213,12 @@ onMounted(loadMeta);
         v-model="input"
         :disabled="sending || limitReached"
         :placeholder="limitReached ? '今日回合已用完，明日再繼續吧。' : '輸入你的行動……'"
-        rows="3"
-        style="flex:1;resize:none"
+        rows="3" style="flex:1;resize:none"
         @keydown.enter.exact.prevent="send"
       />
-      <button
-        @click="send"
-        :disabled="sending || limitReached || !input.trim()"
-        style="align-self:flex-end"
-      >送出</button>
+      <button @click="send" :disabled="sending || limitReached || !input.trim()" style="align-self:flex-end">
+        {{ sending ? '串流中…' : '送出' }}
+      </button>
     </div>
 
   </div>

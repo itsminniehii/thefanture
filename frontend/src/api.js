@@ -39,4 +39,43 @@ export const me = {
 export const ai = {
   chat: (token, worldId, message, history, preferredModel) =>
     post('/ai/chat', { worldId, message, history, preferredModel }, token),
+
+  // Returns the raw Response so the caller can read the SSE stream.
+  // The response is either text/event-stream (stream) or JSON (429 / save card).
+  chatStream: (token, worldId, message, history, preferredModel) =>
+    fetch(`${BASE}/ai/chat`, {
+      method: 'POST',
+      headers: authHeader(token),
+      body: JSON.stringify({ worldId, message, history, preferredModel, stream: true }),
+    }),
 };
+
+// Parse an SSE byte stream, invoking handlers per event type.
+export async function readSSE(response, handlers) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Events are separated by a blank line.
+    let sep;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+
+      let event = 'message';
+      let dataStr = '';
+      for (const line of rawEvent.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+      }
+      if (!dataStr) continue;
+      const data = JSON.parse(dataStr);
+      handlers[event]?.(data);
+    }
+  }
+}
