@@ -16,8 +16,8 @@ const errorMsg     = ref('');
 const userInfo     = ref(null);
 const narrativeEl  = ref(null);
 
-// Model switcher (PRO only)
-const PRO_MODELS = ['gemini-pro', 'opus'];
+// Model switcher (PRO only) — keys match backend paid allowlist
+const PRO_MODELS = ['opus', 'sonnet', 'haiku', 'gemini-pro', 'gemini-flash', 'gemini-flash-lite'];
 const selectedModel = ref('');
 
 async function loadMeta() {
@@ -27,7 +27,7 @@ async function loadMeta() {
   ]);
   usageInfo.value  = u;
   userInfo.value   = m;
-  selectedModel.value = m.preferredModel ?? (props.plan === 'PRO' ? 'gemini-pro' : '');
+  selectedModel.value = m.preferredModel ?? (props.plan === 'PRO' ? 'opus' : '');
   if (u.remaining === 0) limitReached.value = true;
 }
 
@@ -51,8 +51,11 @@ async function send() {
 
   narrative.value.push({ role: 'user', content: msg });
 
-  // Keep last 10 turns as history (20 entries: 10 user + 10 assistant)
-  const history = narrative.value.slice(-21, -1);
+  // History sent to the model: only real dialogue (exclude save recaps),
+  // last 10 turns (20 entries). Backend also re-trims, this just limits payload.
+  const history = narrative.value
+    .filter((e) => e.role === 'user' || e.role === 'assistant')
+    .slice(-21, -1);
 
   try {
     const data = await ai.chat(
@@ -63,7 +66,11 @@ async function send() {
       selectedModel.value || undefined,
     );
 
-    narrative.value.push({ role: 'assistant', content: data.text });
+    if (data.saved) {
+      narrative.value.push({ role: 'save', content: data.rendered });
+    } else {
+      narrative.value.push({ role: 'assistant', content: data.text });
+    }
     usageInfo.value.used      = data.turns_used;
     usageInfo.value.remaining = Math.max(0, usageInfo.value.limit - data.turns_used);
     if (usageInfo.value.remaining === 0) limitReached.value = true;
@@ -119,6 +126,9 @@ onMounted(loadMeta);
         :style="{ marginLeft: entry.role === 'user' ? 'auto' : '0', maxWidth: '90%' }"
       >
         <div v-if="entry.role === 'user'" style="background:#f0f0f0;padding:8px 12px;border-radius:4px;white-space:pre-wrap">
+          {{ entry.content }}
+        </div>
+        <div v-else-if="entry.role === 'save'" style="border:1px dashed #888;background:#fafaf0;padding:12px;white-space:pre-wrap;font-family:monospace;font-size:0.9em">
           {{ entry.content }}
         </div>
         <div v-else style="white-space:pre-wrap;line-height:1.8">

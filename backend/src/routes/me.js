@@ -1,13 +1,9 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import prisma from '../db.js';
+import { PLAN_ALLOWLIST } from '../models.js';
 
 const router = Router();
-
-const PLAN_ALLOWLIST = {
-  FREE: ['gemini-pro', 'sonnet'],
-  PRO:  ['gemini-pro', 'opus'],
-};
 
 router.post('/model', requireAuth, async (req, res) => {
   const { preferredModel } = req.body;

@@ -5,6 +5,7 @@ import authRouter from './routes/auth.js';
 import usageRouter from './routes/usage.js';
 import aiRouter from './routes/ai.js';
 import meRouter from './routes/me.js';
+import savesRouter from './routes/saves.js';
 
 const app = express();
 
@@ -23,6 +24,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/usage', usageRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/me', meRouter);
+app.use('/api/saves', savesRouter);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
