@@ -43,4 +43,13 @@ export async function consumeTurn(userId, plan) {
   return { ok: true, turns: result[0].turns };
 }
 
+// Test-only endpoint: POST /api/usage/consume-test  (disabled in production)
+if (process.env.NODE_ENV !== 'production') {
+  router.post('/consume-test', requireAuth, async (req, res) => {
+    const user = await prisma.user.findUnique({ where: { id: req.user.sub }, select: { plan: true } });
+    const result = await consumeTurn(req.user.sub, user.plan);
+    res.status(result.ok ? 200 : 429).json(result);
+  });
+}
+
 export default router;
