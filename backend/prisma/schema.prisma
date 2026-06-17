@@ -12,8 +12,9 @@ model User {
   id           String   @id @default(uuid())
   email        String   @unique
   passwordHash String   @map("password_hash")
-  plan         Plan     @default(FREE)
-  uiTheme      Int      @default(1) @map("ui_theme")
+  plan           Plan     @default(FREE)
+  preferredModel String?  @map("preferred_model")
+  uiTheme        Int      @default(1) @map("ui_theme")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
