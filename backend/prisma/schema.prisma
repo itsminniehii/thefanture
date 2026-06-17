@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  plan         Plan     @default(FREE)
+  uiTheme      Int      @default(1) @map("ui_theme")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  usageRecords DailyUsage[]
+  saves        Save[]
+
+  @@map("users")
+}
+
+model DailyUsage {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  date      DateTime @db.Date
+  turns     Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@map("daily_usage")
+}
+
+model World {
+  id           String   @id @default(uuid())
+  slug         String   @unique
+  name         String
+  introText    String   @map("intro_text")
+  systemPrompt String   @map("system_prompt")
+  modelFree    String   @map("model_free")
+  modelPaid    String   @map("model_paid")
+  isActive     Boolean  @default(false) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  saves Save[]
+
+  @@map("worlds")
+}
+
+model Save {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  worldId        String   @map("world_id")
+  label          String   @default("自動存檔")
+  stateJson      String   @map("state_json")
+  ciphertextB64  String   @map("ciphertext_b64")
+  ivB64          String   @map("iv_b64")
+  wrappedKeyB64  String   @map("wrapped_key_b64")
+  recoveryKeyB64 String   @map("recovery_key_b64")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  world World @relation(fields: [worldId], references: [id])
+
+  @@map("saves")
+}
+
+enum Plan {
+  FREE
+  PRO
+}
