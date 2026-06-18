@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="40" viewBox="0 0 360 40" fill="none">
+  <!-- Thin gilt filigree divider: centre diamond + tapering hairlines. Original. -->
+  <g stroke="#9a7d44" stroke-width="1.1" stroke-linecap="round" fill="none">
+    <line x1="20" y1="20" x2="150" y2="20"/>
+    <line x1="210" y1="20" x2="340" y2="20"/>
+    <path d="M150 20 q14 -10 30 -10 q-14 10 0 20 q-16 0 -30 -10 Z" fill="#9a7d44" fill-opacity="0.18"/>
+    <path d="M210 20 q-14 -10 -30 -10 q14 10 0 20 q16 0 30 -10 Z" fill="#9a7d44" fill-opacity="0.18"/>
+    <circle cx="180" cy="20" r="2.4" fill="#c9aa66" stroke="none"/>
+    <path d="M150 20 q-10 -7 -22 -5" />
+    <path d="M210 20 q10 -7 22 -5" />
+    <path d="M150 20 q-10 7 -22 5" />
+    <path d="M210 20 q10 7 22 5" />
+  </g>
+</svg>

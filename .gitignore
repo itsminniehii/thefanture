@@ -27,3 +27,7 @@ backend/prisma/migrations/*.sql.bak
 
 # Coverage
 coverage/
+
+# Third-party installed skills (taste-skill etc.) - restore via skills-lock.json
+.agents/
+.claude/skills/

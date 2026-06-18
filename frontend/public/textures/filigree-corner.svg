@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" fill="none">
+  <!-- Gilt corner flourish for panel insets. Original thin filigree. -->
+  <g stroke="#9a7d44" stroke-width="1.1" stroke-linecap="round" fill="none">
+    <path d="M14 14 L14 70"/>
+    <path d="M14 14 L70 14"/>
+    <path d="M14 50 q22 -2 34 -22 q4 -8 14 -10"/>
+    <path d="M50 14 q-2 22 -22 34 q-8 4 -10 14"/>
+    <circle cx="14" cy="14" r="2.6" fill="#c9aa66" stroke="none"/>
+    <path d="M48 28 q8 -2 12 -10" />
+    <path d="M28 48 q-2 8 -10 12" />
+  </g>
+</svg>
