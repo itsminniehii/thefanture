@@ -32,21 +32,21 @@ export const usage = {
 };
 
 export const me = {
-  get:        (token)                  => get('/me/', token),
-  setModel:   (token, preferredModel) => post('/me/model', { preferredModel }, token),
+  get: (token) => get('/me/', token),
+  // No setModel: the model is chosen backend-only; the client never picks one.
 };
 
 export const ai = {
-  chat: (token, worldId, message, history, preferredModel) =>
-    post('/ai/chat', { worldId, message, history, preferredModel }, token),
+  chat: (token, worldId, message, history) =>
+    post('/ai/chat', { worldId, message, history }, token),
 
   // Returns the raw Response so the caller can read the SSE stream.
   // The response is either text/event-stream (stream) or JSON (429 / save card).
-  chatStream: (token, worldId, message, history, preferredModel) =>
+  chatStream: (token, worldId, message, history) =>
     fetch(`${BASE}/ai/chat`, {
       method: 'POST',
       headers: authHeader(token),
-      body: JSON.stringify({ worldId, message, history, preferredModel, stream: true }),
+      body: JSON.stringify({ worldId, message, history, stream: true }),
     }),
 };
 

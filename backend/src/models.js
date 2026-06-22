@@ -12,24 +12,57 @@ export const MODELS = {
   'gemini-flash-lite':  { provider: 'google',    modelString: 'gemini-2.5-flash-lite' },
 };
 
-// Per-plan allowlists — backend-authoritative; the frontend never picks a raw string.
-export const PLAN_ALLOWLIST = {
-  FREE: ['gemini-flash-lite', 'haiku'],
-  PRO:  ['opus', 'sonnet', 'haiku', 'gemini-pro', 'gemini-flash', 'gemini-flash-lite'],
+// ── Plan configuration (single source of truth) ──────────────────────────────
+// Daily turn caps, price, and per-plan model allowlists all live here. usage.js
+// derives DAILY_LIMIT from this; never duplicate these numbers elsewhere.
+// NOTE: the Plan enum in prisma still has only FREE/PRO — the MID/ADVANCED enum
+// values land in a later migration. ADVANCED is the renamed top tier (was PRO).
+export const PLAN_CONFIG = {
+  FREE: {
+    dailyTurns: 7,
+    priceNTD: 0,
+    allowlist: ['gemini-flash-lite', 'haiku'],
+    defaultModel: 'gemini-flash-lite',
+  },
+  MID: {
+    dailyTurns: 15,
+    priceNTD: 79,
+    allowlist: ['gemini-flash-lite', 'haiku'],
+    defaultModel: 'haiku',
+  },
+  ADVANCED: {
+    dailyTurns: 23,
+    priceNTD: 469,
+    allowlist: ['opus', 'sonnet', 'gemini-pro'],
+    defaultModel: 'opus',
+  },
 };
 
-export const PLAN_DEFAULT_MODEL = {
-  FREE: 'gemini-flash-lite',
-  PRO:  'opus',
-};
+// Derived lookups — backend-authoritative; the frontend never picks a raw string.
+export const PLAN_ALLOWLIST = Object.fromEntries(
+  Object.entries(PLAN_CONFIG).map(([plan, c]) => [plan, c.allowlist]),
+);
 
-// Output length cap shared across providers (~500 tokens).
-export const MAX_OUTPUT_TOKENS = 500;
+export const PLAN_DEFAULT_MODEL = Object.fromEntries(
+  Object.entries(PLAN_CONFIG).map(([plan, c]) => [plan, c.defaultModel]),
+);
 
-// Resolve the model key actually used: honor the stored/hinted preference only if
-// it is in the plan's allowlist, otherwise fall back to the plan default.
-export function resolveModelKey(plan, preferredModel) {
-  const list = PLAN_ALLOWLIST[plan] ?? [];
-  if (preferredModel && list.includes(preferredModel)) return preferredModel;
-  return PLAN_DEFAULT_MODEL[plan];
+export const DAILY_LIMIT = Object.fromEntries(
+  Object.entries(PLAN_CONFIG).map(([plan, c]) => [plan, c.dailyTurns]),
+);
+
+// Output length cap shared across providers (~1300 tokens ≈ 750-800 zh chars).
+export const MAX_OUTPUT_TOKENS = 1300;
+
+// ── Server-side routing knobs (adjustable; model choice is backend-only) ──────
+export const OPUS_SUBQUOTA = 6;   // advanced: daily Opus turns before downgrading to Sonnet
+export const SONNET_BUFFER = 8;   // advanced: daily Sonnet buffer before downgrading to Gemini Pro
+export const FREE_LITE_QUOTA = 5; // free: first 5 turns on Lite, rest on Haiku (5 + 2)
+export const MID_LITE_QUOTA = 3;  // mid:  first 3 turns on Lite, rest on Haiku (3 + 12)
+
+// Count-based routing for FREE/MID. turnNumber is the 1-based turn-of-day from
+// consumeTurn. ADVANCED routing is atomic and lives in usage.claimAdvancedSlot.
+export function routeBasicModel(plan, turnNumber) {
+  const liteQuota = plan === 'MID' ? MID_LITE_QUOTA : FREE_LITE_QUOTA;
+  return turnNumber <= liteQuota ? 'gemini-flash-lite' : 'haiku';
 }

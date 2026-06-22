@@ -31,3 +31,6 @@ coverage/
 # Third-party installed skills (taste-skill etc.) - restore via skills-lock.json
 .agents/
 .claude/skills/
+
+# Local per-user Claude Code settings
+.claude/settings.local.json

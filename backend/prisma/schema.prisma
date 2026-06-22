@@ -12,14 +12,18 @@ model User {
   id           String   @id @default(uuid())
   email        String   @unique
   passwordHash String   @map("password_hash")
-  plan           Plan     @default(FREE)
-  preferredModel String?  @map("preferred_model")
-  uiTheme        Int      @default(1) @map("ui_theme")
+  plan             Plan    @default(FREE)
+  // BYOK: the user's own provider key, encrypted with a master key from env.
+  // The backend stores ciphertext only; plaintext never persisted (spec §6).
+  byokKeyEncrypted String? @map("byok_key_encrypted")
+  uiTheme          Int     @default(1) @map("ui_theme")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
   usageRecords DailyUsage[]
   saves        Save[]
+  settingPacks UserSettingPack[]
+  wishes       Wishlist[]
 
   @@map("users")
 }
@@ -29,6 +33,10 @@ model DailyUsage {
   userId    String   @map("user_id")
   date      DateTime @db.Date
   turns     Int      @default(0)
+  // Advanced-tier sub-quota counters (Opus → Sonnet → Gemini Pro downgrade chain).
+  // Live here, not on users, so they reset per day with the same atomic pattern.
+  opusTurns   Int    @default(0) @map("opus_turns")
+  sonnetTurns Int    @default(0) @map("sonnet_turns")
   createdAt DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -49,9 +57,56 @@ model World {
   isActive     Boolean  @default(false) @map("is_active")
   createdAt    DateTime @default(now()) @map("created_at")
 
-  saves Save[]
+  saves        Save[]
+  settingPacks UserSettingPack[]
 
   @@map("worlds")
+}
+
+// Patch-style setting pack: private additions a player layers onto an existing
+// world (not a self-authored world). One pack per (user, world). DB enforces
+// length caps via VarChar; stricter app-layer limits + content filtering live
+// in the AI route (spec §4 / step 4).
+model UserSettingPack {
+  id               String   @id @default(uuid())
+  userId           String   @map("user_id")
+  worldId          String   @map("world_id")
+  playerBackground String?  @map("player_background") @db.VarChar(1000)
+  customCharacters String?  @map("custom_characters") @db.VarChar(2000)
+  termDictionary   String?  @map("term_dictionary")   @db.VarChar(2000)
+  difficulty       String?  @db.VarChar(50)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  world World @relation(fields: [worldId], references: [id])
+
+  @@unique([userId, worldId])
+  @@map("user_setting_packs")
+}
+
+// Wishlist: admin-only. Players submit; only the operator sees entries. There is
+// intentionally no public/listing endpoint that exposes who wished for what.
+// userId is optional (anonymous wishes allowed) and kept only to notify the
+// requester if their world later ships.
+model Wishlist {
+  id        String         @id @default(uuid())
+  userId    String?        @map("user_id")
+  topic     String         @db.VarChar(100)
+  content   String         @db.VarChar(2000)
+  status    WishlistStatus @default(RECEIVED)
+  createdAt DateTime       @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("wishlist")
+}
+
+enum WishlistStatus {
+  RECEIVED      // 已收到（預設）
+  IN_PRODUCTION // 製作中
+  PUBLISHED     // 已上架
+  DECLINED      // 暫不考慮
 }
 
 model Save {
@@ -87,5 +142,6 @@ enum SaveKind {
 
 enum Plan {
   FREE
-  PRO
+  MID
+  ADVANCED
 }

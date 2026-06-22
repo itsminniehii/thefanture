@@ -1,10 +1,13 @@
 import { Router } from 'express';
 import prisma from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { DAILY_LIMIT, OPUS_SUBQUOTA, SONNET_BUFFER } from '../models.js';
 
 const router = Router();
 
-export const DAILY_LIMIT = { FREE: 3, PRO: 20 };
+// DAILY_LIMIT is centralized in models.js (PLAN_CONFIG). Re-exported here so
+// existing importers (ai.js) keep working without touching their import paths.
+export { DAILY_LIMIT };
 const GLOBAL_DAILY_CEILING = parseInt(process.env.GLOBAL_DAILY_TURN_CEILING || '5000', 10);
 
 router.get('/today', requireAuth, async (req, res) => {
@@ -52,6 +55,48 @@ export async function refundTurn(userId) {
     SET turns = GREATEST(turns - 1, 0)
     WHERE user_id = ${userId} AND date = ${today}
   `;
+}
+
+// Advanced-tier downgrade chain, resolved atomically so concurrent turns can't
+// overrun a sub-quota: claim an Opus slot, else a Sonnet slot, else fall back to
+// Gemini Pro. The daily_usage row already exists (consumeTurn ran first).
+// Returns { modelKey, counter } where counter is the column to refund on failure
+// ('opus' | 'sonnet' | null for the unmetered Gemini Pro fallback).
+export async function claimAdvancedSlot(userId) {
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+
+  const opus = await prisma.$queryRaw`
+    UPDATE daily_usage SET opus_turns = opus_turns + 1
+    WHERE user_id = ${userId} AND date = ${today} AND opus_turns < ${OPUS_SUBQUOTA}
+    RETURNING opus_turns
+  `;
+  if (opus.length > 0) return { modelKey: 'opus', counter: 'opus' };
+
+  const sonnet = await prisma.$queryRaw`
+    UPDATE daily_usage SET sonnet_turns = sonnet_turns + 1
+    WHERE user_id = ${userId} AND date = ${today} AND sonnet_turns < ${SONNET_BUFFER}
+    RETURNING sonnet_turns
+  `;
+  if (sonnet.length > 0) return { modelKey: 'sonnet', counter: 'sonnet' };
+
+  return { modelKey: 'gemini-pro', counter: null };
+}
+
+// Refund a claimed sub-quota slot when the model call fails before any output.
+export async function refundSubCounter(userId, counter) {
+  if (!counter) return;
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+  if (counter === 'opus') {
+    await prisma.$queryRaw`
+      UPDATE daily_usage SET opus_turns = GREATEST(opus_turns - 1, 0)
+      WHERE user_id = ${userId} AND date = ${today}
+    `;
+  } else if (counter === 'sonnet') {
+    await prisma.$queryRaw`
+      UPDATE daily_usage SET sonnet_turns = GREATEST(sonnet_turns - 1, 0)
+      WHERE user_id = ${userId} AND date = ${today}
+    `;
+  }
 }
 
 // Test-only endpoint: POST /api/usage/consume-test  (disabled in production)

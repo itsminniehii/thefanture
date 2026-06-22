@@ -15,10 +15,6 @@ const errorMsg     = ref('');
 const userInfo     = ref(null);
 const narrativeEl  = ref(null);
 
-// Model switcher (PRO only) — keys match backend paid allowlist
-const PRO_MODELS = ['opus', 'sonnet', 'haiku', 'gemini-pro', 'gemini-flash', 'gemini-flash-lite'];
-const selectedModel = ref('');
-
 // Typewriter buffer for the currently streaming entry
 const streamingEntry = ref(null);
 let revealTimer = null;
@@ -60,18 +56,7 @@ async function loadMeta() {
   const [u, m] = await Promise.all([usage.today(props.token), me.get(props.token)]);
   usageInfo.value = u;
   userInfo.value  = m;
-  selectedModel.value = m.preferredModel ?? (props.plan === 'PRO' ? 'opus' : '');
   if (u.remaining === 0) limitReached.value = true;
-}
-
-async function switchModel(modelKey) {
-  try {
-    await me.setModel(props.token, modelKey);
-    selectedModel.value = modelKey;
-    userInfo.value.preferredModel = modelKey;
-  } catch (e) {
-    errorMsg.value = e.message;
-  }
 }
 
 function applyRemaining(data) {
@@ -98,7 +83,7 @@ async function send() {
 
   try {
     const res = await ai.chatStream(
-      props.token, HOGWARTS_WORLD_ID, msg, history, selectedModel.value || undefined,
+      props.token, HOGWARTS_WORLD_ID, msg, history,
     );
 
     const ctype = res.headers.get('content-type') || '';
@@ -169,16 +154,6 @@ onUnmounted(stopReveal);
     <div style="padding:12px 0;border-bottom:1px solid #ccc;display:flex;justify-content:space-between;align-items:center">
       <strong>霍格華茲</strong>
       <span>今日剩餘：{{ usageInfo.remaining }} / {{ usageInfo.limit }} 回合</span>
-    </div>
-
-    <!-- PRO model switcher -->
-    <div v-if="plan === 'PRO'" style="padding:8px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <span style="font-size:0.85em">模型：</span>
-      <button
-        v-for="m in PRO_MODELS" :key="m"
-        @click="switchModel(m)"
-        :style="{ fontWeight: selectedModel === m ? 'bold' : 'normal', textDecoration: selectedModel === m ? 'underline' : 'none' }"
-      >{{ m }}</button>
     </div>
 
     <!-- Narrative area -->

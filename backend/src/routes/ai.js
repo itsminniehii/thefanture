@@ -3,9 +3,12 @@ import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { requireAuth } from '../middleware/auth.js';
 import prisma from '../db.js';
-import { consumeTurn, refundTurn, DAILY_LIMIT } from './usage.js';
+import {
+  consumeTurn, refundTurn, refundSubCounter, claimAdvancedSlot, DAILY_LIMIT,
+} from './usage.js';
 import hogwartsSystemPrompt from '../prompts/hogwarts.js';
-import { MODELS, MAX_OUTPUT_TOKENS, resolveModelKey } from '../models.js';
+import { MODELS, MAX_OUTPUT_TOKENS, routeBasicModel } from '../models.js';
+import { buildSettingPackBlock } from '../settingPack.js';
 import {
   getLatestState, buildStateBlock, trimRecentTurns, rollingAutoSave, renderSave,
 } from '../saveService.js';
@@ -19,13 +22,16 @@ const SYSTEM_PROMPTS = { hogwarts: hogwartsSystemPrompt };
 
 const SAVE_KEYWORD = '存檔';
 const AUTOSAVE_EVERY = 5; // turns
+// Saves are just structured JSON extraction — run them on a cheap, JSON-reliable
+// model for every tier, never on the premium sub-quota (Opus/Sonnet).
+const SAVE_MODEL = 'haiku';
 
 // ── Anthropic call ──────────────────────────────────────────────────────────
-// stateBlock (changes per save) goes AFTER the cached system breakpoint so the
-// stable prefix still hits the cache.
-async function callAnthropic(modelString, systemPrompt, stateBlock, messages) {
+// afterCacheBlock (setting pack + per-save state) goes AFTER the cached system
+// breakpoint so the stable prefix still hits the cache.
+async function callAnthropic(modelString, systemPrompt, afterCacheBlock, messages) {
   const system = [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
-  if (stateBlock) system.push({ type: 'text', text: stateBlock });
+  if (afterCacheBlock) system.push({ type: 'text', text: afterCacheBlock });
 
   const response = await anthropic.messages.create({
     model: modelString,
@@ -45,8 +51,8 @@ async function callAnthropic(modelString, systemPrompt, stateBlock, messages) {
 }
 
 // ── Gemini call ───────────────────────────────────────────────────────────────
-async function callGemini(modelString, systemPrompt, stateBlock, messages) {
-  const systemInstruction = stateBlock ? `${systemPrompt}\n\n${stateBlock}` : systemPrompt;
+async function callGemini(modelString, systemPrompt, afterCacheBlock, messages) {
+  const systemInstruction = afterCacheBlock ? `${systemPrompt}\n\n${afterCacheBlock}` : systemPrompt;
   const model = geminiClient.getGenerativeModel({
     model: modelString,
     systemInstruction,
@@ -65,19 +71,19 @@ async function callGemini(modelString, systemPrompt, stateBlock, messages) {
 }
 
 // Provider dispatch by model key.
-async function callModel(modelKey, systemPrompt, stateBlock, messages) {
+async function callModel(modelKey, systemPrompt, afterCacheBlock, messages) {
   const { provider, modelString } = MODELS[modelKey];
   return provider === 'google'
-    ? callGemini(modelString, systemPrompt, stateBlock, messages)
-    : callAnthropic(modelString, systemPrompt, stateBlock, messages);
+    ? callGemini(modelString, systemPrompt, afterCacheBlock, messages)
+    : callAnthropic(modelString, systemPrompt, afterCacheBlock, messages);
 }
 
 // ── Streaming variants ────────────────────────────────────────────────────────
 // Each emits text via onDelta and returns { cache_creation, cache_read }.
 
-async function streamAnthropic(modelString, systemPrompt, stateBlock, messages, onDelta) {
+async function streamAnthropic(modelString, systemPrompt, afterCacheBlock, messages, onDelta) {
   const system = [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
-  if (stateBlock) system.push({ type: 'text', text: stateBlock });
+  if (afterCacheBlock) system.push({ type: 'text', text: afterCacheBlock });
 
   const stream = anthropic.messages.stream({
     model: modelString,
@@ -103,8 +109,8 @@ async function streamAnthropic(modelString, systemPrompt, stateBlock, messages, 
   return { cache_creation, cache_read };
 }
 
-async function streamGemini(modelString, systemPrompt, stateBlock, messages, onDelta) {
-  const systemInstruction = stateBlock ? `${systemPrompt}\n\n${stateBlock}` : systemPrompt;
+async function streamGemini(modelString, systemPrompt, afterCacheBlock, messages, onDelta) {
+  const systemInstruction = afterCacheBlock ? `${systemPrompt}\n\n${afterCacheBlock}` : systemPrompt;
   const model = geminiClient.getGenerativeModel({
     model: modelString,
     systemInstruction,
@@ -129,11 +135,11 @@ async function streamGemini(modelString, systemPrompt, stateBlock, messages, onD
   return { cache_creation: 0, cache_read };
 }
 
-async function streamModel(modelKey, systemPrompt, stateBlock, messages, onDelta) {
+async function streamModel(modelKey, systemPrompt, afterCacheBlock, messages, onDelta) {
   const { provider, modelString } = MODELS[modelKey];
   return provider === 'google'
-    ? streamGemini(modelString, systemPrompt, stateBlock, messages, onDelta)
-    : streamAnthropic(modelString, systemPrompt, stateBlock, messages, onDelta);
+    ? streamGemini(modelString, systemPrompt, afterCacheBlock, messages, onDelta)
+    : streamAnthropic(modelString, systemPrompt, afterCacheBlock, messages, onDelta);
 }
 
 // One SSE event.
@@ -154,7 +160,9 @@ function extractJson(text) {
 
 // ── POST /api/ai/chat ─────────────────────────────────────────────────────────
 router.post('/chat', requireAuth, async (req, res) => {
-  const { worldId, message, history = [], preferredModel, stream = false } = req.body;
+  // Iron rule: the model is chosen ONLY by the backend. We do not read — and must
+  // never accept — any client-supplied "which model" hint from the request body.
+  const { worldId, message, history = [], stream = false } = req.body;
   if (!worldId || !message) {
     return res.status(400).json({ error: 'worldId and message are required' });
   }
@@ -170,7 +178,7 @@ router.post('/chat', requireAuth, async (req, res) => {
 
   const user = await prisma.user.findUnique({
     where: { id: req.user.sub },
-    select: { plan: true, preferredModel: true },
+    select: { plan: true },
   });
 
   // --- STEP 1: consume turn BEFORE any model call (save counts as a turn too) ---
@@ -183,21 +191,47 @@ router.post('/chat', requireAuth, async (req, res) => {
     return res.status(status).json({ error: msg, reason: turnResult.reason });
   }
 
-  // --- STEP 2: resolve model (backend authoritative; client hint validated) ---
-  const modelKey = resolveModelKey(user.plan, preferredModel ?? user.preferredModel);
-
-  // Context compression: system prompt + latest save JSON as "current state" + last 10 turns.
-  const currentState = await getLatestState(req.user.sub, worldId);
-  const stateBlock = buildStateBlock(world.saveTemplate, currentState);
-  const recentHistory = trimRecentTurns(history);
-  console.log(
-    `[ai] world=${world.slug} plan=${user.plan} modelKey=${modelKey} ` +
-    `history_in=${history.length} history_sent=${recentHistory.length} hasState=${!!currentState}`
-  );
-
   const isSave = message.trim() === SAVE_KEYWORD;
 
+  // Everything below can hit the DB or the model API. Keep it all inside one try so
+  // a transient failure becomes a 502 instead of an unhandled rejection that crashes
+  // the process, and any claimed sub-quota slot gets refunded in the catch.
+  let modelKey, subCounter = null;
   try {
+    // --- STEP 2: route the model, backend-authoritative ---
+    // Saves only extract structured JSON — fixed cheap model, never a premium slot.
+    // ADVANCED play: atomic Opus → Sonnet → Gemini Pro chain (claims a slot).
+    // FREE/MID play: count-based Lite → Haiku by turn-of-day.
+    if (isSave) {
+      modelKey = SAVE_MODEL;
+    } else if (user.plan === 'ADVANCED') {
+      ({ modelKey, counter: subCounter } = await claimAdvancedSlot(req.user.sub));
+    } else {
+      modelKey = routeBasicModel(user.plan, turnResult.turns);
+    }
+
+    // Context compression: system prompt + latest save JSON as "current state" + last 10 turns.
+    const currentState = await getLatestState(req.user.sub, worldId);
+    const stateBlock = buildStateBlock(world.saveTemplate, currentState);
+    const recentHistory = trimRecentTurns(history);
+
+    // Patch-style setting pack: inserted AFTER the cached system prefix, BEFORE the
+    // conversation history. It must NOT join the cached prefix (per-user content
+    // would break cache hits). Combine it with the per-save state into one
+    // post-breakpoint block (order: pack, then state).
+    const pack = await prisma.userSettingPack.findUnique({
+      where: { userId_worldId: { userId: req.user.sub, worldId } },
+      select: {
+        playerBackground: true, customCharacters: true, termDictionary: true, difficulty: true,
+      },
+    });
+    const settingPackBlock = buildSettingPackBlock(pack);
+    const afterCacheBlock = [settingPackBlock, stateBlock].filter(Boolean).join('\n\n');
+    console.log(
+      `[ai] world=${world.slug} plan=${user.plan} modelKey=${modelKey} ` +
+      `history_in=${history.length} history_sent=${recentHistory.length} hasState=${!!currentState}`
+    );
+
     if (isSave) {
       // --- SAVE FLOW: ask the model for template-only JSON, then persist ---
       const fields = Array.isArray(world.saveTemplate) ? world.saveTemplate : [];
@@ -206,12 +240,15 @@ router.post('/chat', requireAuth, async (req, res) => {
         `每個欄位填入繁體中文簡述，不要輸出 JSON 以外的任何文字、說明或標點。`;
       const saveMessages = [...recentHistory, { role: 'user', content: instruction }];
 
-      const raw = await callModel(modelKey, systemPrompt, stateBlock, saveMessages);
+      const raw = await callModel(modelKey, systemPrompt, afterCacheBlock, saveMessages);
       let contentJson;
       try {
         contentJson = extractJson(raw);
       } catch (e) {
-        console.error('[save] JSON parse failed:', e.message, '| raw:', raw.slice(0, 200));
+        console.error('[save] JSON parse failed:', e.message);
+        // No usable result for the player → give the turn (and any slot) back.
+        await refundTurn(req.user.sub).catch(() => {});
+        await refundSubCounter(req.user.sub, subCounter).catch(() => {});
         return res.status(502).json({ error: '存檔產生失敗，請再試一次。' });
       }
 
@@ -224,7 +261,7 @@ router.post('/chat', requireAuth, async (req, res) => {
         },
       });
 
-      return res.json({ saved: true, rendered, turns_used: turnResult.turns, model: modelKey });
+      return res.json({ saved: true, rendered, turns_used: turnResult.turns });
     }
 
     // --- NORMAL PLAY ---
@@ -246,10 +283,12 @@ router.post('/chat', requireAuth, async (req, res) => {
 
     if (!stream) {
       // Non-streaming path (unchanged behavior).
-      const text = await callModel(modelKey, systemPrompt, stateBlock, messages);
+      const text = await callModel(modelKey, systemPrompt, afterCacheBlock, messages);
       const autosaved = maybeAutoSave(text);
+      // Response carries story text + the player's own daily quota only — never
+      // the model name or token usage (no engine fingerprint to the client).
       return res.json({
-        text, turns_used: turnResult.turns, model: modelKey,
+        text, turns_used: turnResult.turns,
         remaining: Math.max(0, limit - turnResult.turns), autosaved,
       });
     }
@@ -264,18 +303,19 @@ router.post('/chat', requireAuth, async (req, res) => {
 
     let fullText = '';
     try {
-      const { cache_creation, cache_read } = await streamModel(
-        modelKey, systemPrompt, stateBlock, messages,
+      // cache stats are logged server-side inside streamModel; never sent downstream.
+      await streamModel(
+        modelKey, systemPrompt, afterCacheBlock, messages,
         (delta) => { fullText += delta; sse(res, 'delta', { text: delta }); },
       );
 
       const autosaved = maybeAutoSave(fullText);
+      // done event carries story text + the player's own daily quota only —
+      // no model name, no token usage.
       sse(res, 'done', {
         text: fullText,
-        cache_creation, cache_read,
         turns_used: turnResult.turns,
         remaining: Math.max(0, limit - turnResult.turns),
-        model: modelKey,
         autosaved,
       });
       res.end();
@@ -284,12 +324,18 @@ router.post('/chat', requireAuth, async (req, res) => {
       // Refund only if the stream never produced any output.
       if (fullText === '') {
         await refundTurn(req.user.sub).catch(() => {});
+        await refundSubCounter(req.user.sub, subCounter).catch(() => {});
       }
       sse(res, 'error', { error: '模型回應異常，請稍後再試。' });
       res.end();
     }
   } catch (err) {
     console.error('[ai] model error:', err.message);
+    // Failure on our side (non-stream / save / routing) before a usable response —
+    // refund both the daily turn and any claimed sub-quota slot, symmetric with the
+    // streaming path. The stream path ends its own response, so it never lands here.
+    await refundTurn(req.user.sub).catch(() => {});
+    await refundSubCounter(req.user.sub, subCounter).catch(() => {});
     if (res.headersSent) { res.end(); return; }
     res.status(502).json({ error: '模型回應異常，請稍後再試。' });
   }

@@ -17,12 +17,18 @@ router.post('/register', async (req, res) => {
     res.status(201).json({ token, plan: user.plan });
   } catch (e) {
     if (e.code === 'P2002') return res.status(409).json({ error: 'Email already registered' });
-    throw e;
+    // Don't let an unexpected DB error escape as an unhandled rejection (crashes the process).
+    console.error('[auth] register failed:', e.message);
+    return res.status(500).json({ error: '註冊失敗，請稍後再試。' });
   }
 });
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
+  // Guard before querying: findUnique({ where: { email: undefined } }) throws and,
+  // with no catch here, would crash the process — a one-request DoS.
+  if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
