@@ -22,6 +22,17 @@ async function get(path, token) {
   return data;
 }
 
+async function put(path, body, token) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'PUT',
+    headers: authHeader(token),
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw Object.assign(new Error(data.error ?? 'Error'), { status: res.status, data });
+  return data;
+}
+
 export const auth = {
   register: (email, password) => post('/auth/register', { email, password }),
   login:    (email, password) => post('/auth/login',    { email, password }),
@@ -34,6 +45,11 @@ export const usage = {
 export const me = {
   get: (token) => get('/me/', token),
   // No setModel: the model is chosen backend-only; the client never picks one.
+};
+
+export const settingPacks = {
+  get:    (token, worldId) => get(`/setting-packs/${worldId}`, token),
+  update: (token, worldId, body) => put(`/setting-packs/${worldId}`, body, token),
 };
 
 export const ai = {

@@ -1,11 +1,13 @@
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick } from 'vue';
 import { usage, me, ai, readSSE } from '../api.js';
+import SettingPackForm from './SettingPackForm.vue';
 
 const props = defineProps({ token: String, plan: String });
 
 const HOGWARTS_WORLD_ID = import.meta.env.VITE_HOGWARTS_WORLD_ID;
 
+const settingPackDone = ref(false);
 const usageInfo    = ref({ used: 0, limit: 0, remaining: 0 });
 const narrative    = ref([]);   // [{role, content, ...}]
 const input        = ref('');
@@ -148,7 +150,15 @@ onUnmounted(stopReveal);
 </script>
 
 <template>
-  <div style="display:flex;flex-direction:column;height:100vh;max-width:720px;margin:0 auto;padding:0 16px">
+  <SettingPackForm
+    v-if="!settingPackDone"
+    :world-id="HOGWARTS_WORLD_ID"
+    :token="token"
+    @saved="settingPackDone = true"
+    @skip="settingPackDone = true"
+  />
+
+  <div v-else style="display:flex;flex-direction:column;height:100vh;max-width:720px;margin:0 auto;padding:0 16px">
 
     <!-- Header -->
     <div style="padding:12px 0;border-bottom:1px solid #ccc;display:flex;justify-content:space-between;align-items:center">
