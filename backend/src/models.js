@@ -15,8 +15,8 @@ export const MODELS = {
 // ── Plan configuration (single source of truth) ──────────────────────────────
 // Daily turn caps, price, and per-plan model allowlists all live here. usage.js
 // derives DAILY_LIMIT from this; never duplicate these numbers elsewhere.
-// NOTE: the Plan enum in prisma still has only FREE/PRO — the MID/ADVANCED enum
-// values land in a later migration. ADVANCED is the renamed top tier (was PRO).
+// The Plan enum in prisma is FREE / MID / ADVANCED — these three keys must stay
+// in sync with it.
 export const PLAN_CONFIG = {
   FREE: {
     dailyTurns: 7,

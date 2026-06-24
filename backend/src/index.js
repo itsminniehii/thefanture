@@ -9,6 +9,7 @@ import aiRouter from './routes/ai.js';
 import meRouter from './routes/me.js';
 import savesRouter from './routes/saves.js';
 import settingPacksRouter from './routes/settingPacks.js';
+import byokKeyRouter from './routes/byokKey.js';
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.use('/api/ai', aiRouter);
 app.use('/api/me', meRouter);
 app.use('/api/saves', savesRouter);
 app.use('/api/setting-packs', settingPacksRouter);
+app.use('/api/byok-key', byokKeyRouter);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Backend listening on :${PORT}`));
