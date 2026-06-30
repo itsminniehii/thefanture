@@ -2,11 +2,14 @@
 import { ref, onMounted, onUnmounted, nextTick } from 'vue';
 import { usage, me, ai, readSSE } from '../api.js';
 import SettingPackForm from './SettingPackForm.vue';
+import WorldShelf from './WorldShelf.vue';
+import { WORLDS } from '../constants/worlds.js';
 
 const props = defineProps({ token: String, plan: String });
 
 const HOGWARTS_WORLD_ID = import.meta.env.VITE_HOGWARTS_WORLD_ID;
 
+const selectedWorldId = ref(null);
 const settingPackDone = ref(false);
 const usageInfo    = ref({ used: 0, limit: 0, remaining: 0 });
 const narrative    = ref([]);   // [{role, content, ...}]
@@ -150,9 +153,15 @@ onUnmounted(stopReveal);
 </script>
 
 <template>
+  <WorldShelf
+    v-if="!selectedWorldId"
+    :worlds="WORLDS"
+    @select="selectedWorldId = $event"
+  />
+
   <SettingPackForm
-    v-if="!settingPackDone"
-    :world-id="HOGWARTS_WORLD_ID"
+    v-else-if="!settingPackDone"
+    :world-id="selectedWorldId"
     :token="token"
     @saved="settingPackDone = true"
     @skip="settingPackDone = true"
